@@ -1,6 +1,17 @@
 const App = (() => {
   let currentRole = 'operator';
+  let selectedFiles = [];
   
+  const switchPage = (pageId) => {
+    document.querySelectorAll('.page-section').forEach(section => {
+      section.style.display = 'none';
+    });
+    const target = document.getElementById(pageId);
+    if (target) {
+      target.style.display = 'block';
+    }
+  };
+
   const showToast = (message, type = 'info') => {
     const container = document.querySelector('.toast-container') || createToastContainer();
     
@@ -207,12 +218,13 @@ const App = (() => {
     document.getElementById('detail-created').textContent = Storage.formatDate(task.createdAt);
     document.getElementById('detail-updated').textContent = Storage.formatDate(task.updatedAt);
     
-    document.getElementById('priority-select').value = task.priority;
-    document.getElementById('priority-select').addEventListener('change', (e) => {
+    const prioritySelect = document.getElementById('priority-select');
+    prioritySelect.value = task.priority;
+    prioritySelect.onchange = (e) => {
       TaskManager.setPriority(taskId, e.target.value);
       showToast('优先级已更新', 'success');
       document.getElementById('detail-priority').textContent = Storage.getPriorityText(e.target.value);
-    });
+    };
     
     const previewContainer = document.getElementById('preview-content');
     previewContainer.innerHTML = '';
@@ -222,7 +234,9 @@ const App = (() => {
         const info = await FileHandler.initPdfPreview(task.fileData, previewContainer);
         await FileHandler.renderPdfPage(1, previewContainer);
         updatePreviewControls(info);
-        setupPreviewControls(previewContainer, taskId);
+        setupPreviewControls(previewContainer, taskId, version?.id);
+        setupPdfClickForIssue(previewContainer, taskId, version?.id);
+        setupIssueMarkersForPdf(previewContainer, issues);
       } catch (e) {
         previewContainer.innerHTML = '<p style="color: #ba181b;">PDF预览加载失败</p>';
       }
@@ -246,7 +260,7 @@ const App = (() => {
       document.getElementById('preview-controls').style.display = 'none';
     }
     
-    renderIssuesList(issues);
+    renderIssuesList(issues, previewContainer);
     renderPhotosList(photos);
     renderVersionTimeline(allVersions, task);
     setupDetailActions(taskId, task);
@@ -261,26 +275,159 @@ const App = (() => {
     document.getElementById('btn-next').disabled = info.currentPage >= info.totalPages;
   };
 
-  const setupPreviewControls = (container, taskId) => {
+  const setupPreviewControls = (container, taskId, versionId) => {
     document.getElementById('btn-prev').onclick = async () => {
       const info = await FileHandler.prevPage(container);
-      if (info) updatePreviewControls(info);
+      if (info) {
+        updatePreviewControls(info);
+        const version = TaskManager.getCurrentVersion(taskId);
+        const issues = TaskManager.getVersionIssues(version?.id || '');
+        setupIssueMarkersForPdf(container, issues);
+      }
     };
     
     document.getElementById('btn-next').onclick = async () => {
       const info = await FileHandler.nextPage(container);
-      if (info) updatePreviewControls(info);
+      if (info) {
+        updatePreviewControls(info);
+        const version = TaskManager.getCurrentVersion(taskId);
+        const issues = TaskManager.getVersionIssues(version?.id || '');
+        setupIssueMarkersForPdf(container, issues);
+      }
     };
     
     document.getElementById('btn-zoom-out').onclick = async () => {
       const info = await FileHandler.zoomOut(container);
-      if (info) updatePreviewControls(info);
+      if (info) {
+        updatePreviewControls(info);
+        const version = TaskManager.getCurrentVersion(taskId);
+        const issues = TaskManager.getVersionIssues(version?.id || '');
+        setupIssueMarkersForPdf(container, issues);
+      }
     };
     
     document.getElementById('btn-zoom-in').onclick = async () => {
       const info = await FileHandler.zoomIn(container);
-      if (info) updatePreviewControls(info);
+      if (info) {
+        updatePreviewControls(info);
+        const version = TaskManager.getCurrentVersion(taskId);
+        const issues = TaskManager.getVersionIssues(version?.id || '');
+        setupIssueMarkersForPdf(container, issues);
+      }
     };
+  };
+
+  const setupIssueMarkersForPdf = (container, issues) => {
+    container.querySelectorAll('.issue-marker, .issue-tooltip').forEach(el => el.remove());
+    
+    const canvas = container.querySelector('canvas');
+    if (!canvas) return;
+    
+    const previewInfo = FileHandler.getPreviewInfo();
+    const currentPageNum = previewInfo.currentPage || 1;
+    
+    const pageIssues = issues.filter(i => (i.pageNumber || 1) === currentPageNum);
+    
+    pageIssues.forEach((issue, allIndex) => {
+      const globalIndex = issues.indexOf(issue) + 1;
+      
+      const marker = document.createElement('div');
+      marker.className = `issue-marker ${issue.issueType}`;
+      marker.style.left = `${issue.positionX}%`;
+      marker.style.top = `${issue.positionY}%`;
+      marker.textContent = globalIndex;
+      marker.dataset.issueId = issue.id;
+      
+      const tooltip = document.createElement('div');
+      tooltip.className = 'issue-tooltip';
+      tooltip.style.left = `${issue.positionX}%`;
+      tooltip.style.top = `${issue.positionY + 5}%`;
+      tooltip.innerHTML = `
+        <div style="font-weight: 600; margin-bottom: 4px; color: var(--color-text-primary);">
+          ${Storage.getIssueTypeText(issue.issueType)}
+        </div>
+        <div>${issue.description}</div>
+      `;
+      
+      container.appendChild(marker);
+      container.appendChild(tooltip);
+      
+      marker.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm('删除此问题标记？')) {
+          TaskManager.removeIssue(issue.id);
+          marker.remove();
+          tooltip.remove();
+          const taskId = window.location.hash.split('/')[2];
+          const version = TaskManager.getCurrentVersion(taskId);
+          const updatedIssues = TaskManager.getVersionIssues(version?.id || '');
+          renderIssuesList(updatedIssues, container);
+          setupIssueMarkersForPdf(container, updatedIssues);
+          showToast('问题标记已删除', 'success');
+        }
+      });
+    });
+  };
+
+  const setupPdfClickForIssue = (container, taskId, versionId) => {
+    container.dataset.taskId = taskId;
+    
+    container.addEventListener('click', (e) => {
+      if (e.target.closest('.issue-marker')) return;
+      
+      const selectedType = document.querySelector('.issue-type-btn.active')?.dataset.type;
+      if (!selectedType) {
+        showToast('请先选择问题类型', 'warning');
+        return;
+      }
+      
+      const canvas = container.querySelector('canvas');
+      if (!canvas) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
+      
+      if (x < 0 || x > 100 || y < 0 || y > 100) return;
+      
+      const previewInfo = FileHandler.getPreviewInfo();
+      const pageNumber = previewInfo.currentPage || 1;
+      
+      const modal = showModal(`
+        <div class="form-group">
+          <label class="form-label">问题描述 <span class="required">*</span></label>
+          <textarea class="form-textarea" id="issue-desc" placeholder="请输入问题描述..."></textarea>
+        </div>
+      `, {
+        title: `添加${Storage.getIssueTypeText(selectedType)}问题（第${pageNumber}页）`,
+        footer: `
+          <button class="btn btn-ghost" data-close>取消</button>
+          <button class="btn btn-primary" id="confirm-issue">确认添加</button>
+        `
+      });
+      
+      document.getElementById('confirm-issue').onclick = () => {
+        const description = document.getElementById('issue-desc').value.trim();
+        if (!description) {
+          showToast('请输入问题描述', 'warning');
+          return;
+        }
+        
+        const issue = TaskManager.addIssue(versionId, {
+          issueType: selectedType,
+          description,
+          positionX: Math.round(x * 10) / 10,
+          positionY: Math.round(y * 10) / 10,
+          pageNumber: pageNumber
+        });
+        
+        const updatedIssues = TaskManager.getVersionIssues(versionId);
+        setupIssueMarkersForPdf(container, updatedIssues);
+        renderIssuesList(updatedIssues, container);
+        modal.close();
+        showToast('问题标记已添加', 'success');
+      };
+    });
   };
 
   const setupIssueMarkers = (container, issues) => {
@@ -288,9 +435,6 @@ const App = (() => {
     
     const img = container.querySelector('img');
     if (!img) return;
-    
-    const rect = img.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
     
     issues.forEach((issue, index) => {
       const marker = document.createElement('div');
@@ -320,8 +464,11 @@ const App = (() => {
           TaskManager.removeIssue(issue.id);
           marker.remove();
           tooltip.remove();
-          const version = TaskManager.getCurrentVersion(container.closest('[data-task-id]')?.dataset.taskId);
-          renderIssuesList(TaskManager.getVersionIssues(version?.id || ''));
+          const taskId = window.location.hash.split('/')[2];
+          const version = TaskManager.getCurrentVersion(taskId);
+          const updatedIssues = TaskManager.getVersionIssues(version?.id || '');
+          renderIssuesList(updatedIssues, container);
+          setupIssueMarkers(container, updatedIssues);
           showToast('问题标记已删除', 'success');
         }
       });
@@ -372,12 +519,12 @@ const App = (() => {
           description,
           positionX: Math.round(x * 10) / 10,
           positionY: Math.round(y * 10) / 10,
-          pageNumber: FileHandler.getPreviewInfo().currentPage || 1
+          pageNumber: 1
         });
         
-        const issues = TaskManager.getVersionIssues(versionId);
-        setupIssueMarkers(container, issues);
-        renderIssuesList(issues);
+        const updatedIssues = TaskManager.getVersionIssues(versionId);
+        setupIssueMarkers(container, updatedIssues);
+        renderIssuesList(updatedIssues, container);
         modal.close();
         showToast('问题标记已添加', 'success');
       };
@@ -394,7 +541,7 @@ const App = (() => {
     });
   };
 
-  const renderIssuesList = (issues) => {
+  const renderIssuesList = (issues, previewContainer) => {
     const container = document.getElementById('issues-list');
     if (!container) return;
     
@@ -428,9 +575,16 @@ const App = (() => {
           TaskManager.removeIssue(issueId);
           const taskId = window.location.hash.split('/')[2];
           const version = TaskManager.getCurrentVersion(taskId);
-          const issues = TaskManager.getVersionIssues(version?.id || '');
-          renderIssuesList(issues);
-          setupIssueMarkers(document.getElementById('preview-content'), issues);
+          const updatedIssues = TaskManager.getVersionIssues(version?.id || '');
+          renderIssuesList(updatedIssues, previewContainer);
+          if (previewContainer) {
+            const hasCanvas = previewContainer.querySelector('canvas');
+            if (hasCanvas) {
+              setupIssueMarkersForPdf(previewContainer, updatedIssues);
+            } else {
+              setupIssueMarkers(previewContainer, updatedIssues);
+            }
+          }
           showToast('问题标记已删除', 'success');
         }
       });
@@ -511,8 +665,8 @@ const App = (() => {
           TaskManager.removePhoto(photoId);
           const taskId = window.location.hash.split('/')[2];
           const version = TaskManager.getCurrentVersion(taskId);
-          const photos = TaskManager.getVersionPhotos(version?.id || '');
-          renderPhotosList(photos);
+          const updatedPhotos = TaskManager.getVersionPhotos(version?.id || '');
+          renderPhotosList(updatedPhotos);
           showToast('照片已删除', 'success');
         }
       });
@@ -562,7 +716,9 @@ const App = (() => {
     if (task.status === 'processing') {
       btnSubmit.style.display = 'inline-flex';
       btnSubmit.onclick = () => {
-        const confirmLink = TaskManager.submitForConfirmation(taskId);
+        TaskManager.submitForConfirmation(taskId);
+        const baseUrl = window.location.origin + window.location.pathname.replace(/[^/]*$/, '');
+        const confirmLink = `${baseUrl}confirm.html#/confirm/${task.confirmToken}`;
         navigator.clipboard.writeText(confirmLink).then(() => {
           showToast('客户确认链接已复制到剪贴板', 'success');
         });
@@ -786,33 +942,11 @@ const App = (() => {
   };
 
   const renderNewTaskPage = () => {
-    let selectedFiles = [];
-    
     const uploadArea = document.getElementById('file-upload-area');
     const fileInput = document.getElementById('file-input');
     const fileList = document.getElementById('file-list');
     
-    uploadArea.addEventListener('click', () => fileInput.click());
-    
-    uploadArea.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      uploadArea.classList.add('dragover');
-    });
-    
-    uploadArea.addEventListener('dragleave', () => {
-      uploadArea.classList.remove('dragover');
-    });
-    
-    uploadArea.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      uploadArea.classList.remove('dragover');
-      await handleFileUpload(e.dataTransfer.files);
-    });
-    
-    fileInput.addEventListener('change', async (e) => {
-      await handleFileUpload(e.target.files);
-      e.target.value = '';
-    });
+    if (!uploadArea || !fileInput || !fileList) return;
     
     const handleFileUpload = async (files) => {
       const results = await FileHandler.handleFileSelect(Array.from(files));
@@ -858,8 +992,32 @@ const App = (() => {
       });
     };
     
+    renderFileList();
+    
+    uploadArea.onclick = () => fileInput.click();
+    
+    uploadArea.ondragover = (e) => {
+      e.preventDefault();
+      uploadArea.classList.add('dragover');
+    };
+    
+    uploadArea.ondragleave = () => {
+      uploadArea.classList.remove('dragover');
+    };
+    
+    uploadArea.ondrop = async (e) => {
+      e.preventDefault();
+      uploadArea.classList.remove('dragover');
+      await handleFileUpload(e.dataTransfer.files);
+    };
+    
+    fileInput.onchange = async (e) => {
+      await handleFileUpload(e.target.files);
+      e.target.value = '';
+    };
+    
     const form = document.getElementById('new-task-form');
-    form.addEventListener('submit', (e) => {
+    form.onsubmit = (e) => {
       e.preventDefault();
       
       if (selectedFiles.length === 0) {
@@ -883,21 +1041,25 @@ const App = (() => {
       const tasks = TaskManager.createBatchTasks(selectedFiles, formData);
       showToast(`成功创建 ${tasks.length} 个打样任务`, 'success');
       
+      selectedFiles = [];
+      renderTaskList();
+      
       setTimeout(() => {
         window.location.hash = '#/';
       }, 1000);
-    });
+    };
     
-    document.getElementById('btn-cancel').addEventListener('click', () => {
+    document.getElementById('btn-cancel').onclick = () => {
       window.location.hash = '#/';
-    });
+    };
   };
 
   const setActiveNav = (path) => {
-    document.querySelectorAll('.navbar-link').forEach(link => {
+    document.querySelectorAll('.navbar-link, .navbar-btn').forEach(link => {
       link.classList.remove('active');
       const href = link.getAttribute('href');
-      if (href === path || (path === '/' && href === '#/')) {
+      const route = link.dataset.route;
+      if (route === path || (path === '/' && href === '#/')) {
         link.classList.add('active');
       }
     });
@@ -914,31 +1076,35 @@ const App = (() => {
     }
     
     if (parts[0] === 'task' && parts[1]) {
+      switchPage('page-detail');
       renderTaskDetail(parts[1]);
       setActiveNav('/task');
       return;
     }
     
     if (parts[0] === 'new') {
+      switchPage('page-new');
       renderNewTaskPage();
       setActiveNav('/new');
       return;
     }
     
     if (parts[0] === 'dashboard') {
+      switchPage('page-dashboard');
       renderDashboard();
       setActiveNav('/dashboard');
       return;
     }
     
+    switchPage('page-list');
     renderTaskList();
     setActiveNav('/');
     
     ['filter-status', 'filter-priority', 'search-input'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
-        el.addEventListener('change', renderTaskList);
-        el.addEventListener('input', renderTaskList);
+        el.onchange = renderTaskList;
+        el.oninput = renderTaskList;
       }
     });
   };
